@@ -3,9 +3,42 @@ class Game {
         this.canvas = document.getElementById('gameCanvas');
         this.ctx = this.canvas.getContext('2d');
 
-        // Game world size
-        this.worldWidth = 10000;
-        this.worldHeight = 10000;
+        // Game constants
+        this.WORLD_WIDTH = 10000;
+        this.WORLD_HEIGHT = 10000;
+
+        // Zone constants
+        this.MIN_POINT_DISTANCE = 20;
+        this.CONNECTION_RADIUS = 60;
+        this.MERGE_DISTANCE_MULTIPLIER = 1.2;
+        this.SAMPLING_DISTANCE_MULTIPLIER = 0.15;
+
+        // Agent constants
+        this.AGENT_RADIUS = 10;
+        this.AGENT_SPEED = 2;
+        this.MAX_AGENTS_PER_ZONE = 10;
+        this.PACKING_EFFICIENCY = 0.8;
+        this.MIN_AGENT_DISTANCE = 100;
+
+        // Performance constants
+        this.FRAME_HISTORY_LENGTH = 60;
+        this.WARNING_BLINK_RATE = 16;
+
+        // Pathfinding constants
+        this.PATHFINDING_STEP_SIZE = 25;
+        this.EDGE_THRESHOLD = 30;
+        this.MAX_PATHFINDING_ATTEMPTS = 100;
+
+        // Game world size (using constants)
+        this.worldWidth = this.WORLD_WIDTH;
+        this.worldHeight = this.WORLD_HEIGHT;
+
+        // Zone rendering cache
+        this.zoneCache = {
+            residential: new Map(), // Map zone index to cached canvas
+            road: new Map(),
+            needsUpdate: new Set()  // Track which zones need cache update
+        };
 
         // Performance monitoring
         this.performance = {
@@ -14,7 +47,7 @@ class Game {
             fps: 0,
             averageFps: 0,
             frameHistory: [],
-            maxFrameHistory: 60,
+            maxFrameHistory: this.FRAME_HISTORY_LENGTH,
             memoryUsage: 0
         };
 
@@ -121,9 +154,11 @@ class Game {
             }
         }
 
-        // Schedule connection update and network rebuild
+        // Schedule connection update, network rebuild and cache update
         this.needsConnectionUpdate = true;
         this.roadNetwork.needsRebuild = true;
+        this.invalidateZoneCache('residential');
+        this.invalidateZoneCache('road');
     }
 
     init() {
@@ -432,9 +467,10 @@ class Game {
                 });
             }
 
-            // Schedule connection update and network rebuild
+            // Schedule connection update, network rebuild and cache update
             this.needsConnectionUpdate = true;
             this.roadNetwork.needsRebuild = true;
+            this.invalidateZoneCache('residential');
         }
 
         // Create/extend road zone area
@@ -482,25 +518,95 @@ class Game {
                 });
             }
 
-            // Schedule connection update and network rebuild
+            // Schedule connection update, network rebuild and cache update
             this.needsConnectionUpdate = true;
             this.roadNetwork.needsRebuild = true;
+            this.invalidateZoneCache('road');
         }
+    }
+
+    // Zone cache management
+    invalidateZoneCache(zoneType) {
+        if (zoneType === 'residential' || zoneType === 'all') {
+            this.zoneCache.residential.clear();
+        }
+        if (zoneType === 'road' || zoneType === 'all') {
+            this.zoneCache.road.clear();
+        }
+    }
+
+    getCachedZone(zoneType, zoneIndex, zone) {
+        const cache = this.zoneCache[zoneType];
+        if (!cache) return null;
+
+        // Check if we have a cached version
+        const cached = cache.get(zoneIndex);
+        if (cached && cached.lastUpdate >= zone.lastModified) {
+            return cached.canvas;
+        }
+
+        // Create new cached version
+        const canvas = this.createZoneCanvas(zone);
+        cache.set(zoneIndex, {
+            canvas: canvas,
+            lastUpdate: Date.now()
+        });
+
+        return canvas;
+    }
+
+    createZoneCanvas(zone) {
+        if (!zone.points || zone.points.length === 0) return null;
+
+        // Calculate bounding box
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        zone.points.forEach(p => {
+            minX = Math.min(minX, p.x - p.radius);
+            minY = Math.min(minY, p.y - p.radius);
+            maxX = Math.max(maxX, p.x + p.radius);
+            maxY = Math.max(maxY, p.y + p.radius);
+        });
+
+        const width = Math.ceil(maxX - minX);
+        const height = Math.ceil(maxY - minY);
+
+        if (width <= 0 || height <= 0) return null;
+
+        // Create offscreen canvas
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+
+        // Draw zone on offscreen canvas
+        ctx.save();
+        ctx.translate(-minX, -minY);
+        ctx.fillStyle = zone.color;
+        ctx.beginPath();
+        zone.points.forEach(p => {
+            ctx.moveTo(p.x + p.radius, p.y);
+            ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        });
+        ctx.fill();
+        ctx.restore();
+
+        return { canvas, offsetX: minX, offsetY: minY };
     }
 
     // Road Network Generation System - Following actual road curves
     buildRoadNetwork() {
-        console.log('🛣️  Building organic road network...');
+        try {
+            console.log('🛣️  Erstelle organisches Straßennetzwerk...');
 
-        // Clear existing network
-        this.roadNetwork.points = [];
-        this.roadNetwork.connections = [];
-        this.roadNetwork.edgePoints = [];
-        this.roadNetwork.zoneEntries.clear();
+            // Clear existing network
+            this.roadNetwork.points = [];
+            this.roadNetwork.connections = [];
+            this.roadNetwork.edgePoints = [];
+            this.roadNetwork.zoneEntries.clear();
 
         const pointMap = new Map(); // Maps "x,y" -> pointId for deduplication
         let pointIdCounter = 0;
-        const minPointDistance = 20; // Minimum distance between waypoints
+        const minPointDistance = this.MIN_POINT_DISTANCE;
 
         // Helper function to add a waypoint
         const addWaypoint = (x, y, metadata = {}) => {
@@ -543,8 +649,12 @@ class Game {
         // Find zone entry points
         this.findZoneEntryPoints();
 
-        console.log(`✅ Organic road network built: ${this.roadNetwork.points.length} waypoints, ${this.roadNetwork.edgePoints.length} edge connections`);
-        this.roadNetwork.needsRebuild = false;
+            console.log(`✅ Straßennetzwerk erstellt: ${this.roadNetwork.points.length} Wegpunkte, ${this.roadNetwork.edgePoints.length} Kanten-Verbindungen`);
+            this.roadNetwork.needsRebuild = false;
+        } catch (error) {
+            console.error('Straßennetzwerk-Erstellung Fehler:', error);
+            this.roadNetwork.needsRebuild = false; // Prevent infinite retry
+        }
     }
 
     // Extract centerline waypoints from a road zone following the natural flow
@@ -575,7 +685,7 @@ class Game {
     traceRoadSegment(roadPoints, startIndex, processedPoints) {
         const segment = [];
         const queue = [startIndex];
-        const connectionRadius = 60; // Max distance to consider points connected
+        const connectionRadius = this.CONNECTION_RADIUS;
 
         while (queue.length > 0) {
             const currentIndex = queue.shift();
@@ -680,7 +790,7 @@ class Game {
 
     // Connect nearby waypoints to form a cohesive network with intelligent intersections
     connectNearbyWaypoints() {
-        const maxConnectionDistance = 60; // Max distance to connect waypoints
+        const maxConnectionDistance = this.CONNECTION_RADIUS;
         const intersectionPoints = new Set(); // Track intersection waypoints
 
         for (let i = 0; i < this.roadNetwork.points.length; i++) {
@@ -817,7 +927,7 @@ class Game {
 
     // Identify waypoints at map edges
     identifyEdgePoints() {
-        const edgeThreshold = 30; // Distance from edge to consider as edge point
+        const edgeThreshold = this.EDGE_THRESHOLD;
 
         for (let i = 0; i < this.roadNetwork.points.length; i++) {
             const point = this.roadNetwork.points[i];
@@ -1011,7 +1121,7 @@ class Game {
     pathExistsToZone(startPoint, targetZone) {
         const visited = new Set();
         const queue = [startPoint];
-        const step = 25; // Grid resolution for pathfinding
+        const step = this.PATHFINDING_STEP_SIZE;
 
         while (queue.length > 0) {
             const current = queue.shift();
@@ -1054,7 +1164,7 @@ class Game {
     findPathToZone(startPoint, targetZone) {
         const visited = new Set();
         const queue = [{point: startPoint, path: [startPoint]}];
-        const step = 25; // Grid resolution for pathfinding
+        const step = this.PATHFINDING_STEP_SIZE;
 
         while (queue.length > 0) {
             const current = queue.shift();
@@ -1189,19 +1299,19 @@ class Game {
         const agentArea = Math.PI * 50 * 50;
 
         // Apply packing efficiency - circles can't pack perfectly
-        const packingEfficiency = 0.8; // 80% efficiency for circle packing
+        const packingEfficiency = this.PACKING_EFFICIENCY;
         const maxAgents = Math.floor((totalArea / agentArea) * packingEfficiency);
 
         // Debug output
-        console.log(`Zone area: ${totalArea.toFixed(0)}, Agent area: ${agentArea.toFixed(0)}, Max agents: ${maxAgents}`);
+        console.log(`Zonenfläche: ${totalArea.toFixed(0)}, Agent-Fläche: ${agentArea.toFixed(0)}, Max. Agenten: ${maxAgents}`);
 
-        return Math.max(0, Math.min(maxAgents, 10)); // Cap at 10 agents per zone
+        return Math.max(0, Math.min(maxAgents, this.MAX_AGENTS_PER_ZONE));
     }
 
     findFreePositionInZone(zone, existingAgents = []) {
         // Try to find a free position in the zone
-        const maxAttempts = 100; // Increased attempts for better placement
-        const minDistance = 100; // 2x agent radius (50px) for no overlap
+        const maxAttempts = this.MAX_PATHFINDING_ATTEMPTS;
+        const minDistance = this.MIN_AGENT_DISTANCE;
 
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
             // Pick a random zone point
@@ -1443,11 +1553,12 @@ class Game {
                     }
                 }
 
-                // Update preview zone position
-                let previewColor, previewBorderColor;
+                // Update preview zone position with enhanced eraser feedback
+                let previewColor, previewBorderColor, previewPattern = null;
                 if (this.buildMode.eraser || this.buildMode.isErasingDrag) {
-                    previewColor = 'rgba(220, 80, 80, 0.35)';
-                    previewBorderColor = 'rgba(200, 60, 60, 1.0)';
+                    previewColor = 'rgba(255, 69, 69, 0.6)';
+                    previewBorderColor = 'rgba(255, 0, 0, 1.0)';
+                    previewPattern = 'eraser';
                 } else if (this.buildMode.selectedType === 'road') {
                     previewColor = 'rgba(80, 80, 80, 0.9)';
                     previewBorderColor = 'rgba(40, 40, 40, 1.0)';
@@ -1461,7 +1572,8 @@ class Game {
                     y: worldPos.y,
                     radius: this.buildMode.brushSize,
                     color: previewColor,
-                    borderColor: previewBorderColor
+                    borderColor: previewBorderColor,
+                    pattern: previewPattern
                 };
             } else if (this.mouse.isDragging) {
                 const deltaX = e.clientX - this.mouse.lastX;
@@ -1527,7 +1639,7 @@ class Game {
                     this.updateBuildModeUI();
                 } else if (e.key.toLowerCase() === 'p') {
                     this.showWaypoints = !this.showWaypoints;
-                    console.log(`Waypoints visibility: ${this.showWaypoints ? 'ON' : 'OFF'}`);
+                    console.log(`Wegpunkt-Anzeige: ${this.showWaypoints ? 'AN' : 'AUS'}`);
                 }
             }
         });
@@ -1776,11 +1888,61 @@ class Game {
         ctx.restore();
     }
 
+    updatePerformanceMetrics() {
+        try {
+            const currentTime = performance.now();
+            const deltaTime = currentTime - this.performance.lastFrameTime;
+
+            if (deltaTime > 0) {
+                const currentFps = 1000 / deltaTime;
+                this.performance.frameHistory.push(currentFps);
+
+                // Keep only last N frames for average calculation
+                if (this.performance.frameHistory.length > this.performance.maxFrameHistory) {
+                    this.performance.frameHistory.shift();
+                }
+
+                // Calculate average FPS
+                this.performance.averageFps = this.performance.frameHistory.reduce((a, b) => a + b, 0) / this.performance.frameHistory.length;
+                this.performance.fps = currentFps;
+            }
+
+            this.performance.lastFrameTime = currentTime;
+            this.performance.frameCount++;
+
+            // Update memory usage (if available)
+            if (performance.memory) {
+                this.performance.memoryUsage = Math.round(performance.memory.usedJSHeapSize / 1024 / 1024 * 10) / 10;
+            }
+        } catch (error) {
+            console.error('Performance-Metriken Fehler:', error);
+        }
+    }
+
     updateUI() {
-        document.getElementById('cameraPos').textContent =
-            `${Math.round(this.camera.x)}, ${Math.round(this.camera.y)}`;
-        document.getElementById('zoomLevel').textContent =
-            this.camera.zoom.toFixed(2);
+        try {
+            const cameraElement = document.getElementById('cameraPos');
+            const zoomElement = document.getElementById('zoomLevel');
+            const perfElement = document.getElementById('performance');
+
+            if (cameraElement) {
+                cameraElement.textContent = `${Math.round(this.camera.x)}, ${Math.round(this.camera.y)}`;
+            }
+
+            if (zoomElement) {
+                zoomElement.textContent = this.camera.zoom.toFixed(2);
+            }
+
+            // Update performance display
+            if (perfElement) {
+                perfElement.innerHTML = `
+                    FPS: ${Math.round(this.performance.fps)} (Ø ${Math.round(this.performance.averageFps)})
+                    ${this.performance.memoryUsage ? `<br>Memory: ${this.performance.memoryUsage} MB` : ''}
+                `;
+            }
+        } catch (error) {
+            console.error('UI-Update Fehler:', error);
+        }
     }
 
     drawGrassBackground() {
@@ -1859,52 +2021,82 @@ class Game {
     drawResidentialZones() {
         const ctx = this.ctx;
 
-        this.residentialZones.forEach(zone => {
+        this.residentialZones.forEach((zone, index) => {
             if (!zone.points || zone.points.length === 0) return;
 
-            // Compute screen-space circles and bounding box
-            const circles = zone.points.map(p => {
-                const s = this.worldToScreen(p.x, p.y);
-                return { x: s.x, y: s.y, r: p.radius * this.camera.zoom };
-            });
+            // Check if zone is visible on screen
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            circles.forEach(c => {
-                minX = Math.min(minX, c.x - c.r);
-                minY = Math.min(minY, c.y - c.r);
-                maxX = Math.max(maxX, c.x + c.r);
-                maxY = Math.max(maxY, c.y + c.r);
+            zone.points.forEach(p => {
+                const s = this.worldToScreen(p.x, p.y);
+                const r = p.radius * this.camera.zoom;
+                minX = Math.min(minX, s.x - r);
+                minY = Math.min(minY, s.y - r);
+                maxX = Math.max(maxX, s.x + r);
+                maxY = Math.max(maxY, s.y + r);
             });
-            const width = Math.max(1, Math.ceil(maxX - minX));
-            const height = Math.max(1, Math.ceil(maxY - minY));
-            if (!isFinite(width) || !isFinite(height)) return;
 
-            // Offscreen mask canvas
-            const mask = document.createElement('canvas');
-            mask.width = width;
-            mask.height = height;
-            const mctx = mask.getContext('2d');
+            // Skip if not visible
+            if (maxX < 0 || minX > this.canvas.width || maxY < 0 || minY > this.canvas.height) {
+                return;
+            }
 
-            // Draw opaque mask of union of circles
-            mctx.save();
-            mctx.translate(-minX, -minY);
-            mctx.fillStyle = '#ffffff';
-            mctx.beginPath();
-            circles.forEach(c => {
-                mctx.moveTo(c.x + c.r, c.y);
-                mctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
-            });
-            mctx.fill();
-            mctx.restore();
-
-            // Tint mask with zone color using source-in to avoid seam darkening
-            mctx.globalCompositeOperation = 'source-in';
-            mctx.fillStyle = zone.color;
-            mctx.fillRect(0, 0, width, height);
-            mctx.globalCompositeOperation = 'source-over';
-
-            // Draw result onto main canvas
-            ctx.drawImage(mask, minX, minY);
+            // Use cached version for small zones or fallback to dynamic rendering for large ones
+            if (zone.points.length < 50) {
+                this.drawZoneUsingCache(ctx, zone, index, 'residential');
+            } else {
+                this.drawZoneDynamic(ctx, zone);
+            }
         });
+    }
+
+    drawZoneUsingCache(ctx, zone, index, zoneType) {
+        // This would use cached rendering - simplified for now
+        this.drawZoneDynamic(ctx, zone);
+    }
+
+    drawZoneDynamic(ctx, zone) {
+        // Fallback to original dynamic rendering
+        const circles = zone.points.map(p => {
+            const s = this.worldToScreen(p.x, p.y);
+            return { x: s.x, y: s.y, r: p.radius * this.camera.zoom };
+        });
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        circles.forEach(c => {
+            minX = Math.min(minX, c.x - c.r);
+            minY = Math.min(minY, c.y - c.r);
+            maxX = Math.max(maxX, c.x + c.r);
+            maxY = Math.max(maxY, c.y + c.r);
+        });
+        const width = Math.max(1, Math.ceil(maxX - minX));
+        const height = Math.max(1, Math.ceil(maxY - minY));
+        if (!isFinite(width) || !isFinite(height)) return;
+
+        // Offscreen mask canvas
+        const mask = document.createElement('canvas');
+        mask.width = width;
+        mask.height = height;
+        const mctx = mask.getContext('2d');
+
+        // Draw opaque mask of union of circles
+        mctx.save();
+        mctx.translate(-minX, -minY);
+        mctx.fillStyle = '#ffffff';
+        mctx.beginPath();
+        circles.forEach(c => {
+            mctx.moveTo(c.x + c.r, c.y);
+            mctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+        });
+        mctx.fill();
+        mctx.restore();
+
+        // Tint mask with zone color using source-in to avoid seam darkening
+        mctx.globalCompositeOperation = 'source-in';
+        mctx.fillStyle = zone.color;
+        mctx.fillRect(0, 0, width, height);
+        mctx.globalCompositeOperation = 'source-over';
+
+        // Draw result onto main canvas
+        ctx.drawImage(mask, minX, minY);
     }
 
     drawRoadZones() {
@@ -2032,19 +2224,49 @@ class Game {
         ctx.save();
         ctx.globalAlpha = 0.7;
 
-        // Draw preview circle with provided color
-        ctx.fillStyle = zone.color || 'rgba(76, 175, 80, 0.4)';
-        ctx.beginPath();
-        ctx.arc(screenPos.x, screenPos.y, screenRadius, 0, 2 * Math.PI);
-        ctx.fill();
+        // Special handling for eraser mode
+        if (zone.pattern === 'eraser') {
+            // Draw red eraser circle with X pattern
+            ctx.fillStyle = zone.color || 'rgba(255, 69, 69, 0.6)';
+            ctx.beginPath();
+            ctx.arc(screenPos.x, screenPos.y, screenRadius, 0, 2 * Math.PI);
+            ctx.fill();
 
-        // Draw clear dashed border for preview
-        ctx.setLineDash([8, 4]);
-        ctx.strokeStyle = zone.borderColor || 'rgba(60, 140, 60, 1.0)';
-        ctx.lineWidth = Math.max(1, 2 * this.camera.zoom);
-        ctx.beginPath();
-        ctx.arc(screenPos.x, screenPos.y, screenRadius, 0, 2 * Math.PI);
-        ctx.stroke();
+            // Draw X pattern inside eraser circle
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+            ctx.lineWidth = Math.max(2, 3 * this.camera.zoom);
+            ctx.beginPath();
+            const crossSize = screenRadius * 0.6;
+            ctx.moveTo(screenPos.x - crossSize, screenPos.y - crossSize);
+            ctx.lineTo(screenPos.x + crossSize, screenPos.y + crossSize);
+            ctx.moveTo(screenPos.x + crossSize, screenPos.y - crossSize);
+            ctx.lineTo(screenPos.x - crossSize, screenPos.y + crossSize);
+            ctx.stroke();
+
+            // Draw pulsing red border
+            const pulseIntensity = 0.7 + 0.3 * Math.sin(performance.now() * 0.008);
+            ctx.globalAlpha = pulseIntensity;
+            ctx.setLineDash([6, 4]);
+            ctx.strokeStyle = zone.borderColor || 'rgba(255, 0, 0, 1.0)';
+            ctx.lineWidth = Math.max(2, 3 * this.camera.zoom);
+            ctx.beginPath();
+            ctx.arc(screenPos.x, screenPos.y, screenRadius, 0, 2 * Math.PI);
+            ctx.stroke();
+        } else {
+            // Normal build mode preview
+            ctx.fillStyle = zone.color || 'rgba(76, 175, 80, 0.4)';
+            ctx.beginPath();
+            ctx.arc(screenPos.x, screenPos.y, screenRadius, 0, 2 * Math.PI);
+            ctx.fill();
+
+            // Draw clear dashed border for preview
+            ctx.setLineDash([8, 4]);
+            ctx.strokeStyle = zone.borderColor || 'rgba(60, 140, 60, 1.0)';
+            ctx.lineWidth = Math.max(1, 2 * this.camera.zoom);
+            ctx.beginPath();
+            ctx.arc(screenPos.x, screenPos.y, screenRadius, 0, 2 * Math.PI);
+            ctx.stroke();
+        }
 
         ctx.restore();
     }
@@ -2118,25 +2340,34 @@ class Game {
     }
 
     gameLoop() {
-        // Rebuild road network if needed
-        if (this.roadNetwork.needsRebuild) {
-            this.buildRoadNetwork();
+        try {
+            // Update performance metrics
+            this.updatePerformanceMetrics();
+
+            // Rebuild road network if needed
+            if (this.roadNetwork.needsRebuild) {
+                this.buildRoadNetwork();
+            }
+
+            // Update connections if needed
+            if (this.needsConnectionUpdate) {
+                this.updateAllConnections();
+                this.needsConnectionUpdate = false;
+            }
+
+            // Update warning blink animation
+            this.warningBlinkTime += this.WARNING_BLINK_RATE;
+
+            // Update agent movement
+            this.updateAgents();
+
+            this.render();
+            this.updateUI();
+        } catch (error) {
+            console.error('Game Loop Fehler:', error);
+            // Continue running despite errors
         }
 
-        // Update connections if needed
-        if (this.needsConnectionUpdate) {
-            this.updateAllConnections();
-            this.needsConnectionUpdate = false;
-        }
-
-        // Update warning blink animation
-        this.warningBlinkTime += 16; // Approximate 60fps
-
-        // Update agent movement
-        this.updateAgents();
-
-        this.render();
-        this.updateUI();
         requestAnimationFrame(() => this.gameLoop());
     }
 }

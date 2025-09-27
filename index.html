@@ -142,45 +142,48 @@
 <body>
     <canvas id="gameCanvas"></canvas>
     <div id="ui">
-        <div>Camera: <span id="cameraPos">0, 0</span></div>
+        <div>Kamera: <span id="cameraPos">0, 0</span></div>
         <div>Zoom: <span id="zoomLevel">1.0</span>x</div>
-        <div>Use mouse to drag, scroll to zoom</div>
-        <div>Press P to toggle waypoint display</div>
+        <div id="performance" style="color: #4CAF50; font-size: 11px;">FPS: -- MB: --</div>
+        <div style="margin-top: 8px; border-top: 1px solid #444; padding-top: 8px; font-size: 11px;">
+            <div>Maus ziehen zum Bewegen, Scrollen zum Zoomen</div>
+            <div>P drücken für Wegpunkt-Anzeige</div>
+        </div>
         <div id="buildMode" style="display: none; margin-top: 10px; color: #4a7c3f;">
-            <strong>Build Mode: <span id="selectedBuildItem">None</span></strong><br>
-            Click/drag to paint. [ / ] size, E eraser, P waypoints, ESC cancel
+            <strong>Bau-Modus: <span id="selectedBuildItem">Keiner</span></strong><br>
+            Klicken/Ziehen zum Malen. [ / ] Größe, E Radierer, P Wegpunkte, ESC Abbruch
         </div>
     </div>
 
     <div id="buildMenu">
         <div id="buildMenuHeader">
-            <span>Build Menu</span>
+            <span>Bau-Menü</span>
             <span id="buildMenuToggle">▼</span>
         </div>
         <div id="buildMenuContent">
             <div class="build-category">
-                <div class="category-header">Zoning</div>
+                <div class="category-header">Zonierung</div>
                 <div class="build-items">
                     <div class="build-item" data-type="residential-small" data-size="50">
-                        <div class="build-item-icon" style="background: #4CAF50; color: white;">●</div>
-                        <div class="build-item-name">Residential S</div>
+                        <div class="build-item-icon" style="background: #4CAF50; color: white;">🏠</div>
+                        <div class="build-item-name">Wohngebiet S</div>
                     </div>
                     <div class="build-item" data-type="residential-medium" data-size="100">
-                        <div class="build-item-icon" style="background: #4CAF50; color: white;">●</div>
-                        <div class="build-item-name">Residential M</div>
+                        <div class="build-item-icon" style="background: #4CAF50; color: white;">🏘️</div>
+                        <div class="build-item-name">Wohngebiet M</div>
                     </div>
                     <div class="build-item" data-type="residential-large" data-size="150">
-                        <div class="build-item-icon" style="background: #4CAF50; color: white;">●</div>
-                        <div class="build-item-name">Residential L</div>
+                        <div class="build-item-icon" style="background: #4CAF50; color: white;">🏙️</div>
+                        <div class="build-item-name">Wohngebiet L</div>
                     </div>
                 </div>
             </div>
             <div class="build-category">
-                <div class="category-header">Infrastructure</div>
+                <div class="category-header">Infrastruktur</div>
                 <div class="build-items">
                     <div class="build-item" data-type="road" data-size="25">
-                        <div class="build-item-icon" style="background: #505050; color: white;">●</div>
-                        <div class="build-item-name">Roads</div>
+                        <div class="build-item-icon" style="background: #505050; color: white;">🛣️</div>
+                        <div class="build-item-name">Straßen</div>
                     </div>
                 </div>
             </div>
