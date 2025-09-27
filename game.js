@@ -776,6 +776,41 @@ class Game {
         return []; // No path found
     }
 
+    // Find path between two specific network nodes
+    findNetworkPathBetweenNodes(startPointId, targetPointId) {
+        if (startPointId === targetPointId) {
+            return [this.roadNetwork.points[startPointId]];
+        }
+
+        // Simple BFS to target node
+        const visited = new Set();
+        const queue = [{pointId: startPointId, path: [startPointId]}];
+
+        while (queue.length > 0) {
+            const current = queue.shift();
+
+            if (visited.has(current.pointId)) continue;
+            visited.add(current.pointId);
+
+            // Check if we reached the target node
+            if (current.pointId === targetPointId) {
+                return current.path.map(id => this.roadNetwork.points[id]);
+            }
+
+            // Add neighbors
+            for (let neighborId of this.roadNetwork.connections[current.pointId] || []) {
+                if (!visited.has(neighborId)) {
+                    queue.push({
+                        pointId: neighborId,
+                        path: [...current.path, neighborId]
+                    });
+                }
+            }
+        }
+
+        return []; // No path found
+    }
+
     // Find closest network point to a position
     findClosestNetworkPoint(x, y) {
         let closestId = -1;
@@ -992,18 +1027,21 @@ class Game {
                 const spawnPoint = this.findRandomEdgeConnection();
                 if (!spawnPoint) break; // No edge connection available
 
-                // Calculate path using network
-                let path = [];
+                // Find closest road node to final position
+                const closestNodeToFinalPosition = this.findClosestNetworkPoint(finalPosition.x, finalPosition.y);
+
+                // Calculate path using network - first to closest node to final position
+                let pathToNode = [];
                 if (this.roadNetwork.points.length > 0) {
                     const startPointId = this.findClosestNetworkPoint(spawnPoint.x, spawnPoint.y);
-                    if (startPointId >= 0) {
-                        path = this.findNetworkPath(startPointId, zoneIndex);
+                    if (startPointId >= 0 && closestNodeToFinalPosition >= 0) {
+                        pathToNode = this.findNetworkPathBetweenNodes(startPointId, closestNodeToFinalPosition);
                     }
                 }
 
                 // Fallback to old pathfinding if network fails
-                if (path.length === 0) {
-                    path = this.findPathToZone(spawnPoint, zone);
+                if (pathToNode.length === 0) {
+                    pathToNode = this.findPathToZone(spawnPoint, zone);
                 }
 
                 const agent = {
@@ -1011,9 +1049,10 @@ class Game {
                     y: spawnPoint.y,
                     targetZoneIndex: zoneIndex,
                     finalPosition: finalPosition,
-                    path: path,
-                    pathIndex: 0,
-                    phase: 'traveling',
+                    closestNodeToFinalPosition: closestNodeToFinalPosition,
+                    pathToNode: pathToNode,
+                    pathToNodeIndex: 0,
+                    phase: 'traveling_to_node',
                     speed: 2,
                     radius: 10,
                     color: '#ffff00'
@@ -1109,18 +1148,21 @@ class Game {
             const spawnPoint = this.findRandomEdgeConnection();
             if (!spawnPoint) break; // No edge connection available
 
-            // Calculate path using network
-            let path = [];
+            // Find closest road node to final position
+            const closestNodeToFinalPosition = this.findClosestNetworkPoint(finalPosition.x, finalPosition.y);
+
+            // Calculate path using network - first to closest node to final position
+            let pathToNode = [];
             if (this.roadNetwork.points.length > 0) {
                 const startPointId = this.findClosestNetworkPoint(spawnPoint.x, spawnPoint.y);
-                if (startPointId >= 0) {
-                    path = this.findNetworkPath(startPointId, zoneIndex);
+                if (startPointId >= 0 && closestNodeToFinalPosition >= 0) {
+                    pathToNode = this.findNetworkPathBetweenNodes(startPointId, closestNodeToFinalPosition);
                 }
             }
 
             // Fallback to old pathfinding if network fails
-            if (path.length === 0) {
-                path = this.findPathToZone(spawnPoint, zone);
+            if (pathToNode.length === 0) {
+                pathToNode = this.findPathToZone(spawnPoint, zone);
             }
 
             const agent = {
@@ -1128,9 +1170,10 @@ class Game {
                 y: spawnPoint.y,
                 targetZoneIndex: zoneIndex,
                 finalPosition: finalPosition,
-                path: path,
-                pathIndex: 0,
-                phase: 'traveling', // 'traveling' or 'settled'
+                closestNodeToFinalPosition: closestNodeToFinalPosition,
+                pathToNode: pathToNode,
+                pathToNodeIndex: 0,
+                phase: 'traveling_to_node', // 'traveling_to_node', 'traveling_to_area', 'settling' or 'settled'
                 speed: 2,
                 radius: 10,
                 color: '#ffff00'
@@ -1148,28 +1191,31 @@ class Game {
 
     updateAgents() {
         for (let agent of this.agents) {
-            if (agent.phase === 'traveling') {
-                this.updateAgentTraveling(agent);
+            if (agent.phase === 'traveling_to_node') {
+                this.updateAgentTravelingToNode(agent);
+            } else if (agent.phase === 'traveling_to_area') {
+                this.updateAgentTravelingToArea(agent);
             } else if (agent.phase === 'settling') {
                 this.updateAgentSettling(agent);
             }
         }
     }
 
-    updateAgentTraveling(agent) {
-        if (!agent.path || agent.path.length === 0) {
-            // No path, agent is stuck
+    updateAgentTravelingToNode(agent) {
+        if (!agent.pathToNode || agent.pathToNode.length === 0) {
+            // No path to node, switch to area traveling
+            agent.phase = 'traveling_to_area';
             return;
         }
 
-        // Get current target point in path
-        if (agent.pathIndex >= agent.path.length) {
-            // Reached end of path, start settling
-            agent.phase = 'settling';
+        // Get current target point in path to node
+        if (agent.pathToNodeIndex >= agent.pathToNode.length) {
+            // Reached the closest node to final position, now go to area
+            agent.phase = 'traveling_to_area';
             return;
         }
 
-        const targetPoint = agent.path[agent.pathIndex];
+        const targetPoint = agent.pathToNode[agent.pathToNodeIndex];
         const dx = targetPoint.x - agent.x;
         const dy = targetPoint.y - agent.y;
         const distance = Math.hypot(dx, dy);
@@ -1178,9 +1224,28 @@ class Game {
             // Reached current waypoint, move to next
             agent.x = targetPoint.x;
             agent.y = targetPoint.y;
-            agent.pathIndex++;
+            agent.pathToNodeIndex++;
         } else {
             // Move towards current waypoint
+            const moveX = (dx / distance) * agent.speed;
+            const moveY = (dy / distance) * agent.speed;
+            agent.x += moveX;
+            agent.y += moveY;
+        }
+    }
+
+    updateAgentTravelingToArea(agent) {
+        // Agent has reached the closest road node to final position
+        // Now move directly to the final position in the area
+        const dx = agent.finalPosition.x - agent.x;
+        const dy = agent.finalPosition.y - agent.y;
+        const distance = Math.hypot(dx, dy);
+
+        if (distance < agent.speed) {
+            // Close enough to final position, start settling
+            agent.phase = 'settling';
+        } else {
+            // Move towards final position
             const moveX = (dx / distance) * agent.speed;
             const moveY = (dy / distance) * agent.speed;
             agent.x += moveX;
