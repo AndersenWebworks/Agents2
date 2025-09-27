@@ -44,6 +44,16 @@ class Game {
         this.needsConnectionUpdate = false;
         this.warningBlinkTime = 0;
 
+        // Road network system
+        this.roadNetwork = {
+            points: [],           // All waypoints in the network
+            connections: [],      // Adjacency list of connections
+            edgePoints: [],       // Points that connect to map edges
+            zoneEntries: new Map(), // Map from zone index to entry point IDs
+            needsRebuild: true    // Flag to rebuild network
+        };
+        this.showWaypoints = false; // Toggle for waypoint visualization
+
         // Build mode
         this.buildMode = {
             active: false,
@@ -95,8 +105,9 @@ class Game {
             }
         }
 
-        // Schedule connection update
+        // Schedule connection update and network rebuild
         this.needsConnectionUpdate = true;
+        this.roadNetwork.needsRebuild = true;
     }
 
     init() {
@@ -307,8 +318,9 @@ class Game {
                 });
             }
 
-            // Schedule connection update
+            // Schedule connection update and network rebuild
             this.needsConnectionUpdate = true;
+            this.roadNetwork.needsRebuild = true;
         }
 
         // Create/extend road zone area
@@ -356,9 +368,429 @@ class Game {
                 });
             }
 
-            // Schedule connection update
+            // Schedule connection update and network rebuild
             this.needsConnectionUpdate = true;
+            this.roadNetwork.needsRebuild = true;
         }
+    }
+
+    // Road Network Generation System - Following actual road curves
+    buildRoadNetwork() {
+        console.log('🛣️  Building organic road network...');
+
+        // Clear existing network
+        this.roadNetwork.points = [];
+        this.roadNetwork.connections = [];
+        this.roadNetwork.edgePoints = [];
+        this.roadNetwork.zoneEntries.clear();
+
+        const pointMap = new Map(); // Maps "x,y" -> pointId for deduplication
+        let pointIdCounter = 0;
+        const minPointDistance = 20; // Minimum distance between waypoints
+
+        // Helper function to add a waypoint
+        const addWaypoint = (x, y, metadata = {}) => {
+            // Round to avoid floating point issues
+            x = Math.round(x);
+            y = Math.round(y);
+
+            // Check if point already exists nearby
+            for (let existingPoint of this.roadNetwork.points) {
+                if (Math.hypot(x - existingPoint.x, y - existingPoint.y) < minPointDistance) {
+                    return existingPoint.id; // Return existing point
+                }
+            }
+
+            const pointId = pointIdCounter++;
+            const point = {
+                id: pointId,
+                x: x,
+                y: y,
+                ...metadata
+            };
+
+            this.roadNetwork.points.push(point);
+            this.roadNetwork.connections.push([]);
+            return pointId;
+        };
+
+        // Process each road zone to extract centerlines
+        for (let zoneIndex = 0; zoneIndex < this.roadZones.length; zoneIndex++) {
+            const zone = this.roadZones[zoneIndex];
+            this.extractRoadCenterline(zone, addWaypoint);
+        }
+
+        // Connect nearby waypoints to form the network
+        this.connectNearbyWaypoints();
+
+        // Identify edge points (connection to map boundaries)
+        this.identifyEdgePoints();
+
+        // Find zone entry points
+        this.findZoneEntryPoints();
+
+        console.log(`✅ Organic road network built: ${this.roadNetwork.points.length} waypoints, ${this.roadNetwork.edgePoints.length} edge connections`);
+        this.roadNetwork.needsRebuild = false;
+    }
+
+    // Extract centerline waypoints from a road zone following the natural flow
+    extractRoadCenterline(zone, addWaypoint) {
+        if (zone.points.length === 0) return;
+
+        // Create a more intelligent road flow by connecting nearby road points
+        const processedPoints = new Set();
+        const roadSegments = [];
+
+        // Group connected road points into segments
+        for (let i = 0; i < zone.points.length; i++) {
+            if (processedPoints.has(i)) continue;
+
+            const segment = this.traceRoadSegment(zone.points, i, processedPoints);
+            if (segment.length > 0) {
+                roadSegments.push(segment);
+            }
+        }
+
+        // Create waypoints for each segment
+        for (let segment of roadSegments) {
+            this.createWaypointsForSegment(segment, addWaypoint);
+        }
+    }
+
+    // Trace a connected road segment starting from a point
+    traceRoadSegment(roadPoints, startIndex, processedPoints) {
+        const segment = [];
+        const queue = [startIndex];
+        const connectionRadius = 60; // Max distance to consider points connected
+
+        while (queue.length > 0) {
+            const currentIndex = queue.shift();
+            if (processedPoints.has(currentIndex)) continue;
+
+            processedPoints.add(currentIndex);
+            segment.push(roadPoints[currentIndex]);
+
+            // Find nearby unprocessed points
+            for (let i = 0; i < roadPoints.length; i++) {
+                if (processedPoints.has(i)) continue;
+
+                const distance = Math.hypot(
+                    roadPoints[currentIndex].x - roadPoints[i].x,
+                    roadPoints[currentIndex].y - roadPoints[i].y
+                );
+
+                if (distance <= connectionRadius) {
+                    queue.push(i);
+                }
+            }
+        }
+
+        return segment;
+    }
+
+    // Create waypoints along a road segment following the natural curve
+    createWaypointsForSegment(segment, addWaypoint) {
+        if (segment.length === 0) return;
+
+        // Sort segment points to create a natural flow
+        const sortedSegment = this.sortPointsForFlow(segment);
+
+        // Create waypoints with adaptive density
+        for (let i = 0; i < sortedSegment.length; i++) {
+            const point = sortedSegment[i];
+
+            // Always create waypoint at the road point center
+            const waypointId = addWaypoint(point.x, point.y, {
+                roadRadius: point.radius,
+                segmentIndex: i,
+                isRoadCenter: true
+            });
+
+            // For larger road segments, create intermediate waypoints
+            if (i < sortedSegment.length - 1) {
+                const nextPoint = sortedSegment[i + 1];
+                const distance = Math.hypot(nextPoint.x - point.x, nextPoint.y - point.y);
+
+                // Add intermediate waypoints for longer stretches
+                if (distance > 50) {
+                    const steps = Math.ceil(distance / 30);
+                    for (let step = 1; step < steps; step++) {
+                        const t = step / steps;
+                        const interpX = point.x + (nextPoint.x - point.x) * t;
+                        const interpY = point.y + (nextPoint.y - point.y) * t;
+
+                        // Only add if it's actually on road
+                        if (this.isOnRoad(interpX, interpY)) {
+                            addWaypoint(interpX, interpY, {
+                                roadRadius: Math.min(point.radius, nextPoint.radius),
+                                segmentIndex: i + t,
+                                isIntermediate: true
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort points to create natural flow (simple distance-based for now)
+    sortPointsForFlow(points) {
+        if (points.length <= 1) return points;
+
+        const sorted = [points[0]];
+        const remaining = points.slice(1);
+
+        while (remaining.length > 0) {
+            const lastPoint = sorted[sorted.length - 1];
+            let closestIndex = 0;
+            let closestDistance = Infinity;
+
+            // Find closest remaining point
+            for (let i = 0; i < remaining.length; i++) {
+                const distance = Math.hypot(
+                    lastPoint.x - remaining[i].x,
+                    lastPoint.y - remaining[i].y
+                );
+                if (distance < closestDistance) {
+                    closestDistance = distance;
+                    closestIndex = i;
+                }
+            }
+
+            sorted.push(remaining[closestIndex]);
+            remaining.splice(closestIndex, 1);
+        }
+
+        return sorted;
+    }
+
+    // Connect nearby waypoints to form a cohesive network with intelligent intersections
+    connectNearbyWaypoints() {
+        const maxConnectionDistance = 60; // Max distance to connect waypoints
+        const intersectionPoints = new Set(); // Track intersection waypoints
+
+        for (let i = 0; i < this.roadNetwork.points.length; i++) {
+            const pointA = this.roadNetwork.points[i];
+
+            for (let j = i + 1; j < this.roadNetwork.points.length; j++) {
+                const pointB = this.roadNetwork.points[j];
+                const distance = Math.hypot(pointA.x - pointB.x, pointA.y - pointB.y);
+
+                if (distance <= maxConnectionDistance) {
+                    // Check if there's a clear road path between these points
+                    if (this.hasRoadPathBetween(pointA, pointB)) {
+                        if (!this.roadNetwork.connections[i].includes(j)) {
+                            this.roadNetwork.connections[i].push(j);
+                            this.roadNetwork.connections[j].push(i);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Identify and enhance intersection points
+        this.identifyIntersections();
+
+        // Create smoother connections for complex intersections
+        this.optimizeIntersectionConnections();
+    }
+
+    // Identify waypoints that serve as intersections (3+ connections)
+    identifyIntersections() {
+        for (let i = 0; i < this.roadNetwork.points.length; i++) {
+            const connections = this.roadNetwork.connections[i];
+
+            if (connections.length >= 3) {
+                // Mark as intersection point
+                this.roadNetwork.points[i].isIntersection = true;
+
+                // Check if we need additional waypoints around the intersection
+                this.enhanceIntersection(i);
+            }
+        }
+    }
+
+    // Add waypoints around complex intersections for smoother navigation
+    enhanceIntersection(intersectionIndex) {
+        const intersection = this.roadNetwork.points[intersectionIndex];
+        const connections = this.roadNetwork.connections[intersectionIndex];
+
+        // For intersections with many connections, add approach points
+        if (connections.length >= 4) {
+            const approachDistance = 25; // Distance to place approach points
+
+            for (let connectionId of connections) {
+                const connectedPoint = this.roadNetwork.points[connectionId];
+
+                // Calculate approach point position
+                const dx = intersection.x - connectedPoint.x;
+                const dy = intersection.y - connectedPoint.y;
+                const distance = Math.hypot(dx, dy);
+
+                if (distance > approachDistance * 2) {
+                    const normalizedDx = dx / distance;
+                    const normalizedDy = dy / distance;
+
+                    const approachX = intersection.x - normalizedDx * approachDistance;
+                    const approachY = intersection.y - normalizedDy * approachDistance;
+
+                    // Only add if on road and not too close to existing points
+                    if (this.isOnRoad(approachX, approachY)) {
+                        let tooClose = false;
+                        for (let existingPoint of this.roadNetwork.points) {
+                            if (Math.hypot(approachX - existingPoint.x, approachY - existingPoint.y) < 15) {
+                                tooClose = true;
+                                break;
+                            }
+                        }
+
+                        if (!tooClose) {
+                            const approachId = this.roadNetwork.points.length;
+                            this.roadNetwork.points.push({
+                                id: approachId,
+                                x: Math.round(approachX),
+                                y: Math.round(approachY),
+                                isApproach: true,
+                                parentIntersection: intersectionIndex
+                            });
+                            this.roadNetwork.connections.push([intersectionIndex, connectionId]);
+
+                            // Update connections
+                            this.roadNetwork.connections[intersectionIndex].push(approachId);
+                            this.roadNetwork.connections[connectionId].push(approachId);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Optimize connections around intersections for better flow
+    optimizeIntersectionConnections() {
+        for (let i = 0; i < this.roadNetwork.points.length; i++) {
+            const point = this.roadNetwork.points[i];
+
+            if (point.isIntersection) {
+                // Sort connections by angle for better navigation
+                const connections = this.roadNetwork.connections[i];
+                connections.sort((a, b) => {
+                    const pointA = this.roadNetwork.points[a];
+                    const pointB = this.roadNetwork.points[b];
+
+                    const angleA = Math.atan2(pointA.y - point.y, pointA.x - point.x);
+                    const angleB = Math.atan2(pointB.y - point.y, pointB.x - point.x);
+
+                    return angleA - angleB;
+                });
+            }
+        }
+    }
+
+    // Check if there's a road path between two points
+    hasRoadPathBetween(pointA, pointB) {
+        const steps = 10;
+        for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const x = pointA.x + (pointB.x - pointA.x) * t;
+            const y = pointA.y + (pointB.y - pointA.y) * t;
+
+            if (!this.isOnRoad(x, y)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Identify waypoints at map edges
+    identifyEdgePoints() {
+        const edgeThreshold = 30; // Distance from edge to consider as edge point
+
+        for (let i = 0; i < this.roadNetwork.points.length; i++) {
+            const point = this.roadNetwork.points[i];
+
+            if (point.x <= edgeThreshold || point.x >= this.worldWidth - edgeThreshold ||
+                point.y <= edgeThreshold || point.y >= this.worldHeight - edgeThreshold) {
+                this.roadNetwork.edgePoints.push(i);
+            }
+        }
+    }
+
+    // Find waypoints that serve as zone entry points
+    findZoneEntryPoints() {
+        for (let zoneIndex = 0; zoneIndex < this.residentialZones.length; zoneIndex++) {
+            const zone = this.residentialZones[zoneIndex];
+            const entryPoints = [];
+
+            for (let i = 0; i < this.roadNetwork.points.length; i++) {
+                const waypoint = this.roadNetwork.points[i];
+
+                // Check if waypoint is near the zone boundary
+                for (let zonePoint of zone.points) {
+                    const distance = Math.hypot(waypoint.x - zonePoint.x, waypoint.y - zonePoint.y);
+                    const proximityThreshold = zonePoint.radius + 40; // Slightly outside zone
+
+                    if (distance <= proximityThreshold && distance >= zonePoint.radius - 20) {
+                        entryPoints.push(i);
+                        break;
+                    }
+                }
+            }
+
+            this.roadNetwork.zoneEntries.set(zoneIndex, entryPoints);
+        }
+    }
+
+    // Find path using shared network
+    findNetworkPath(startPointId, targetZoneIndex) {
+        const entryPoints = this.roadNetwork.zoneEntries.get(targetZoneIndex);
+        if (!entryPoints || entryPoints.length === 0) {
+            return [];
+        }
+
+        // Simple BFS to nearest zone entry point
+        const visited = new Set();
+        const queue = [{pointId: startPointId, path: [startPointId]}];
+
+        while (queue.length > 0) {
+            const current = queue.shift();
+
+            if (visited.has(current.pointId)) continue;
+            visited.add(current.pointId);
+
+            // Check if we reached a zone entry point
+            if (entryPoints.includes(current.pointId)) {
+                return current.path.map(id => this.roadNetwork.points[id]);
+            }
+
+            // Add neighbors
+            for (let neighborId of this.roadNetwork.connections[current.pointId] || []) {
+                if (!visited.has(neighborId)) {
+                    queue.push({
+                        pointId: neighborId,
+                        path: [...current.path, neighborId]
+                    });
+                }
+            }
+        }
+
+        return []; // No path found
+    }
+
+    // Find closest network point to a position
+    findClosestNetworkPoint(x, y) {
+        let closestId = -1;
+        let closestDistance = Infinity;
+
+        for (let i = 0; i < this.roadNetwork.points.length; i++) {
+            const point = this.roadNetwork.points[i];
+            const distance = Math.hypot(x - point.x, y - point.y);
+            if (distance < closestDistance) {
+                closestDistance = distance;
+                closestId = i;
+            }
+        }
+
+        return closestId;
     }
 
     // Connection checking system
@@ -560,8 +992,19 @@ class Game {
                 const spawnPoint = this.findRandomEdgeConnection();
                 if (!spawnPoint) break; // No edge connection available
 
-                // Calculate path to zone
-                const path = this.findPathToZone(spawnPoint, zone);
+                // Calculate path using network
+                let path = [];
+                if (this.roadNetwork.points.length > 0) {
+                    const startPointId = this.findClosestNetworkPoint(spawnPoint.x, spawnPoint.y);
+                    if (startPointId >= 0) {
+                        path = this.findNetworkPath(startPointId, zoneIndex);
+                    }
+                }
+
+                // Fallback to old pathfinding if network fails
+                if (path.length === 0) {
+                    path = this.findPathToZone(spawnPoint, zone);
+                }
 
                 const agent = {
                     x: spawnPoint.x,
@@ -639,10 +1082,15 @@ class Game {
     }
 
     findRandomEdgeConnection() {
+        // Use network edge points if available
+        if (this.roadNetwork.edgePoints.length > 0) {
+            const randomEdgeId = this.roadNetwork.edgePoints[Math.floor(Math.random() * this.roadNetwork.edgePoints.length)];
+            return this.roadNetwork.points[randomEdgeId];
+        }
+
+        // Fallback to old method
         const edgeConnections = this.findRoadConnectionsAtEdge();
         if (edgeConnections.length === 0) return null;
-
-        // Return random edge connection
         return edgeConnections[Math.floor(Math.random() * edgeConnections.length)];
     }
 
@@ -661,8 +1109,19 @@ class Game {
             const spawnPoint = this.findRandomEdgeConnection();
             if (!spawnPoint) break; // No edge connection available
 
-            // Calculate path to zone
-            const path = this.findPathToZone(spawnPoint, zone);
+            // Calculate path using network
+            let path = [];
+            if (this.roadNetwork.points.length > 0) {
+                const startPointId = this.findClosestNetworkPoint(spawnPoint.x, spawnPoint.y);
+                if (startPointId >= 0) {
+                    path = this.findNetworkPath(startPointId, zoneIndex);
+                }
+            }
+
+            // Fallback to old pathfinding if network fails
+            if (path.length === 0) {
+                path = this.findPathToZone(spawnPoint, zone);
+            }
 
             const agent = {
                 x: spawnPoint.x,
@@ -883,6 +1342,9 @@ class Game {
                 } else if (e.key.toLowerCase() === 'e') {
                     this.buildMode.eraser = !this.buildMode.eraser;
                     this.updateBuildModeUI();
+                } else if (e.key.toLowerCase() === 'p') {
+                    this.showWaypoints = !this.showWaypoints;
+                    console.log(`Waypoints visibility: ${this.showWaypoints ? 'ON' : 'OFF'}`);
                 }
             }
         });
@@ -1024,6 +1486,113 @@ class Game {
         ctx.restore();
     }
 
+    drawWaypoints() {
+        const ctx = this.ctx;
+
+        // Only show waypoints at certain zoom levels (when zoomed in enough to see detail)
+        if (this.camera.zoom < 0.5) return;
+
+        ctx.save();
+
+        // Adjust opacity based on zoom level
+        const minZoom = 0.5;
+        const maxZoom = 2.0;
+        const opacity = Math.min(1.0, (this.camera.zoom - minZoom) / (maxZoom - minZoom));
+        ctx.globalAlpha = opacity * 0.6;
+
+        // Draw waypoint connections first (thin lines)
+        ctx.strokeStyle = '#666666';
+        ctx.lineWidth = Math.max(0.5, 1 * this.camera.zoom);
+        ctx.beginPath();
+
+        for (let i = 0; i < this.roadNetwork.points.length; i++) {
+            const point = this.roadNetwork.points[i];
+            const screenPos = this.worldToScreen(point.x, point.y);
+
+            // Skip if point is off-screen
+            if (screenPos.x < -50 || screenPos.x > this.canvas.width + 50 ||
+                screenPos.y < -50 || screenPos.y > this.canvas.height + 50) {
+                continue;
+            }
+
+            // Draw connections to neighbors
+            for (let neighborId of this.roadNetwork.connections[i] || []) {
+                const neighbor = this.roadNetwork.points[neighborId];
+                const neighborScreenPos = this.worldToScreen(neighbor.x, neighbor.y);
+
+                ctx.moveTo(screenPos.x, screenPos.y);
+                ctx.lineTo(neighborScreenPos.x, neighborScreenPos.y);
+            }
+        }
+        ctx.stroke();
+
+        // Draw waypoints themselves
+        const pointRadius = Math.max(2, 3 * this.camera.zoom);
+
+        for (let i = 0; i < this.roadNetwork.points.length; i++) {
+            const point = this.roadNetwork.points[i];
+            const screenPos = this.worldToScreen(point.x, point.y);
+
+            // Skip if point is off-screen
+            if (screenPos.x < -50 || screenPos.x > this.canvas.width + 50 ||
+                screenPos.y < -50 || screenPos.y > this.canvas.height + 50) {
+                continue;
+            }
+
+            // Different colors for different types of points
+            if (this.roadNetwork.edgePoints.includes(i)) {
+                // Edge points (spawn locations)
+                ctx.fillStyle = '#44ff44';
+                ctx.strokeStyle = '#22aa22';
+            } else if (this.roadNetwork.points[i].isIntersection) {
+                // Intersection points
+                ctx.fillStyle = '#ff6644';
+                ctx.strokeStyle = '#cc4422';
+            } else if (this.roadNetwork.points[i].isApproach) {
+                // Approach points to intersections
+                ctx.fillStyle = '#ffaa44';
+                ctx.strokeStyle = '#cc8822';
+            } else if (this.roadNetwork.points[i].isRoadCenter) {
+                // Main road centerpoints
+                ctx.fillStyle = '#ffffff';
+                ctx.strokeStyle = '#888888';
+            } else {
+                // Intermediate waypoints
+                ctx.fillStyle = '#cccccc';
+                ctx.strokeStyle = '#666666';
+            }
+
+            ctx.lineWidth = Math.max(0.5, 1 * this.camera.zoom);
+
+            ctx.beginPath();
+            ctx.arc(screenPos.x, screenPos.y, pointRadius, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.stroke();
+        }
+
+        // Draw zone entry indicators
+        ctx.fillStyle = '#ffaa44';
+        ctx.strokeStyle = '#cc8822';
+        for (let [zoneIndex, entryPointIds] of this.roadNetwork.zoneEntries) {
+            for (let pointId of entryPointIds) {
+                const point = this.roadNetwork.points[pointId];
+                const screenPos = this.worldToScreen(point.x, point.y);
+
+                if (screenPos.x < -50 || screenPos.x > this.canvas.width + 50 ||
+                    screenPos.y < -50 || screenPos.y > this.canvas.height + 50) {
+                    continue;
+                }
+
+                ctx.beginPath();
+                ctx.arc(screenPos.x, screenPos.y, pointRadius * 1.5, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.stroke();
+            }
+        }
+
+        ctx.restore();
+    }
+
     updateUI() {
         document.getElementById('cameraPos').textContent =
             `${Math.round(this.camera.x)}, ${Math.round(this.camera.y)}`;
@@ -1097,6 +1666,11 @@ class Game {
 
         // Draw agents
         this.drawAgents();
+
+        // Draw waypoints if enabled
+        if (this.showWaypoints) {
+            this.drawWaypoints();
+        }
     }
 
     drawResidentialZones() {
@@ -1361,6 +1935,11 @@ class Game {
     }
 
     gameLoop() {
+        // Rebuild road network if needed
+        if (this.roadNetwork.needsRebuild) {
+            this.buildRoadNetwork();
+        }
+
         // Update connections if needed
         if (this.needsConnectionUpdate) {
             this.updateAllConnections();
