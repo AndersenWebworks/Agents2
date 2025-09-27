@@ -88,6 +88,11 @@ class Game {
         this.needsConnectionUpdate = false;
         this.warningBlinkTime = 0;
 
+        // Agent spawning with delay
+        this.agentSpawnQueue = []; // Queue of agents to spawn with delay
+        this.lastSpawnTime = 0;
+        this.spawnDelay = 1000; // 1 second delay between spawns
+
         // Road network system
         this.roadNetwork = {
             points: [],           // All waypoints in the network
@@ -481,7 +486,20 @@ class Game {
                 radius: this.buildMode.brushSize
             };
 
-            // Find all nearby zones to merge with
+            // Remove residential zones that overlap with the new road zone
+            const overlapRadius = this.buildMode.brushSize;
+            for (let i = this.residentialZones.length - 1; i >= 0; i--) {
+                const zone = this.residentialZones[i];
+                zone.points = zone.points.filter(p => {
+                    const distance = Math.hypot(x - p.x, y - p.y);
+                    return distance >= overlapRadius;
+                });
+                if (zone.points.length === 0) {
+                    this.residentialZones.splice(i, 1);
+                }
+            }
+
+            // Find all nearby road zones to merge with
             const mergeDistance = this.buildMode.brushSize * 1.2;
             const matchedIndices = [];
             for (let i = 0; i < this.roadZones.length; i++) {
@@ -522,6 +540,7 @@ class Game {
             this.needsConnectionUpdate = true;
             this.roadNetwork.needsRebuild = true;
             this.invalidateZoneCache('road');
+            this.invalidateZoneCache('residential');
         }
     }
 
@@ -1052,6 +1071,294 @@ class Game {
         return closestId;
     }
 
+    // Find nearest road segment and calculate its direction
+    findNearestRoadSegment(x, y) {
+        let closestPoint = null;
+        let closestDistance = Infinity;
+        let roadDirection = { x: 0, y: 1 }; // Default direction (north)
+
+        // Search through all road zones
+        for (let zone of this.roadZones) {
+            for (let point of zone.points) {
+                const distance = Math.hypot(x - point.x, y - point.y);
+                if (distance < closestDistance) {
+                    closestDistance = distance;
+                    closestPoint = point;
+                }
+            }
+        }
+
+        if (closestPoint) {
+            // Calculate road direction by looking at nearby road points
+            roadDirection = this.calculateRoadDirection(closestPoint.x, closestPoint.y);
+        }
+
+        return {
+            position: closestPoint,
+            direction: roadDirection,
+            distance: closestDistance
+        };
+    }
+
+    // Calculate road direction at a specific point by analyzing nearby road points
+    calculateRoadDirection(x, y) {
+        const sampleRadius = 40;
+        const roadPoints = [];
+
+        // Collect nearby road points
+        for (let zone of this.roadZones) {
+            for (let point of zone.points) {
+                const distance = Math.hypot(x - point.x, y - point.y);
+                if (distance <= sampleRadius && distance > 0) {
+                    roadPoints.push({
+                        x: point.x,
+                        y: point.y,
+                        distance: distance
+                    });
+                }
+            }
+        }
+
+        if (roadPoints.length === 0) {
+            return { x: 0, y: 1 }; // Default direction
+        }
+
+        // Calculate average direction vector
+        let sumX = 0, sumY = 0;
+        for (let point of roadPoints) {
+            const dx = point.x - x;
+            const dy = point.y - y;
+            const weight = 1 / (point.distance + 1); // Closer points have more influence
+            sumX += dx * weight;
+            sumY += dy * weight;
+        }
+
+        // Normalize direction vector
+        const length = Math.hypot(sumX, sumY);
+        if (length > 0) {
+            return { x: sumX / length, y: sumY / length };
+        }
+
+        return { x: 0, y: 1 }; // Default direction
+    }
+
+    // Calculate perpendicular direction to road (for lot depth)
+    calculatePerpendicularDirection(roadDirection) {
+        // Perpendicular vector: if road direction is (x,y), perpendicular is (-y,x) or (y,-x)
+        // We choose the direction that points away from road center
+        return {
+            x: -roadDirection.y,
+            y: roadDirection.x
+        };
+    }
+
+    // Generate adaptive lot polygon for an agent based on road shape and available space
+    generateAdaptiveLot(agent) {
+        const roadSegment = this.findNearestRoadSegment(agent.finalPosition.x, agent.finalPosition.y);
+
+        if (!roadSegment.position) {
+            // Fallback to circular lot if no road found
+            return this.generateCircularLot(agent.finalPosition.x, agent.finalPosition.y, 30);
+        }
+
+        const roadDirection = roadSegment.direction;
+        const perpDirection = this.calculatePerpendicularDirection(roadDirection);
+
+        // Parameters for lot generation
+        const minLotDepth = 25;
+        const maxLotDepth = 50;
+        const minLotWidth = 20;
+        const maxLotWidth = 60;
+
+        // Find street front position (close to road)
+        const streetFrontDistance = 5; // Distance from road edge
+        const streetFrontX = agent.finalPosition.x - perpDirection.x * streetFrontDistance;
+        const streetFrontY = agent.finalPosition.y - perpDirection.y * streetFrontDistance;
+
+        // Calculate lot depth (going away from road)
+        const availableDepth = this.calculateAvailableDepth(streetFrontX, streetFrontY, perpDirection, maxLotDepth);
+        const lotDepth = Math.max(minLotDepth, availableDepth);
+
+        // Calculate lot width (along the road)
+        const availableWidth = this.calculateAvailableWidth(streetFrontX, streetFrontY, roadDirection, maxLotWidth);
+        const lotWidth = Math.max(minLotWidth, availableWidth);
+
+        // Generate lot polygon points
+        const halfWidth = lotWidth / 2;
+
+        const frontLeft = {
+            x: streetFrontX + roadDirection.x * halfWidth,
+            y: streetFrontY + roadDirection.y * halfWidth
+        };
+
+        const frontRight = {
+            x: streetFrontX - roadDirection.x * halfWidth,
+            y: streetFrontY - roadDirection.y * halfWidth
+        };
+
+        const backLeft = {
+            x: frontLeft.x + perpDirection.x * lotDepth,
+            y: frontLeft.y + perpDirection.y * lotDepth
+        };
+
+        const backRight = {
+            x: frontRight.x + perpDirection.x * lotDepth,
+            y: frontRight.y + perpDirection.y * lotDepth
+        };
+
+        return {
+            points: [frontLeft, frontRight, backRight, backLeft],
+            center: agent.finalPosition,
+            area: lotWidth * lotDepth
+        };
+    }
+
+    // Calculate available depth from street going inward
+    calculateAvailableDepth(startX, startY, direction, maxDepth) {
+        const stepSize = 5;
+        let depth = 0;
+
+        for (let d = stepSize; d <= maxDepth; d += stepSize) {
+            const checkX = startX + direction.x * d;
+            const checkY = startY + direction.y * d;
+
+            // Check if position is still in residential zone and not occupied
+            if (this.isPositionInResidentialZone(checkX, checkY) &&
+                !this.isPositionOccupiedByOtherAgent(checkX, checkY)) {
+                depth = d;
+            } else {
+                break;
+            }
+        }
+
+        return depth;
+    }
+
+    // Calculate available width along the road
+    calculateAvailableWidth(centerX, centerY, roadDirection, maxWidth) {
+        const stepSize = 5;
+        let leftWidth = 0;
+        let rightWidth = 0;
+
+        // Check left side
+        for (let w = stepSize; w <= maxWidth / 2; w += stepSize) {
+            const checkX = centerX + roadDirection.x * w;
+            const checkY = centerY + roadDirection.y * w;
+
+            if (this.isPositionInResidentialZone(checkX, checkY) &&
+                !this.isPositionOccupiedByOtherAgent(checkX, checkY)) {
+                leftWidth = w;
+            } else {
+                break;
+            }
+        }
+
+        // Check right side
+        for (let w = stepSize; w <= maxWidth / 2; w += stepSize) {
+            const checkX = centerX - roadDirection.x * w;
+            const checkY = centerY - roadDirection.y * w;
+
+            if (this.isPositionInResidentialZone(checkX, checkY) &&
+                !this.isPositionOccupiedByOtherAgent(checkX, checkY)) {
+                rightWidth = w;
+            } else {
+                break;
+            }
+        }
+
+        return leftWidth + rightWidth;
+    }
+
+    // Check if position is in any residential zone
+    isPositionInResidentialZone(x, y) {
+        for (let zone of this.residentialZones) {
+            for (let point of zone.points) {
+                const distance = Math.hypot(x - point.x, y - point.y);
+                if (distance <= point.radius) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Check if position is occupied by another agent's lot
+    isPositionOccupiedByOtherAgent(x, y) {
+        const minDistance = 15; // Minimum distance between agent territories
+
+        for (let agent of this.agents) {
+            if (agent.lotPolygon && agent.phase === 'settled') {
+                if (this.isPointInPolygon(x, y, agent.lotPolygon.points)) {
+                    return true;
+                }
+            } else if (agent.finalPosition) {
+                const distance = Math.hypot(x - agent.finalPosition.x, y - agent.finalPosition.y);
+                if (distance < minDistance) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Fallback circular lot generation
+    generateCircularLot(x, y, radius) {
+        const points = [];
+        const segments = 8;
+
+        for (let i = 0; i < segments; i++) {
+            const angle = (i / segments) * Math.PI * 2;
+            points.push({
+                x: x + Math.cos(angle) * radius,
+                y: y + Math.sin(angle) * radius
+            });
+        }
+
+        return {
+            points: points,
+            center: { x, y },
+            area: Math.PI * radius * radius
+        };
+    }
+
+    // Point in polygon test using ray casting algorithm
+    isPointInPolygon(x, y, polygonPoints) {
+        let isInside = false;
+        let j = polygonPoints.length - 1;
+
+        for (let i = 0; i < polygonPoints.length; i++) {
+            const xi = polygonPoints[i].x;
+            const yi = polygonPoints[i].y;
+            const xj = polygonPoints[j].x;
+            const yj = polygonPoints[j].y;
+
+            if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+                isInside = !isInside;
+            }
+            j = i;
+        }
+
+        return isInside;
+    }
+
+    // Check if two polygons overlap
+    doPolygonsOverlap(poly1Points, poly2Points) {
+        // Simple check: if any point of poly1 is inside poly2 or vice versa
+        for (let point of poly1Points) {
+            if (this.isPointInPolygon(point.x, point.y, poly2Points)) {
+                return true;
+            }
+        }
+
+        for (let point of poly2Points) {
+            if (this.isPointInPolygon(point.x, point.y, poly1Points)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // Connection checking system
     isOnRoad(x, y) {
         for (let zone of this.roadZones) {
@@ -1365,6 +1672,7 @@ class Game {
         const existingAgents = this.agents.filter(agent => agent.targetZoneIndex === zoneIndex);
         const agentsToSpawn = maxAgents - existingAgents.length;
 
+        // Queue agents for delayed spawning instead of spawning all at once
         for (let i = 0; i < agentsToSpawn; i++) {
             const finalPosition = this.findFreePositionInZone(zone, existingAgents);
             if (!finalPosition) break; // No more free positions
@@ -1389,7 +1697,7 @@ class Game {
                 pathToNode = this.findPathToZone(spawnPoint, zone);
             }
 
-            const agent = {
+            const agentConfig = {
                 x: spawnPoint.x,
                 y: spawnPoint.y,
                 targetZoneIndex: zoneIndex,
@@ -1397,20 +1705,35 @@ class Game {
                 closestNodeToFinalPosition: closestNodeToFinalPosition,
                 pathToNode: pathToNode,
                 pathToNodeIndex: 0,
-                phase: 'traveling_to_node', // 'traveling_to_node', 'traveling_to_area', 'settling' or 'settled'
+                phase: 'traveling_to_node',
                 speed: 2,
                 radius: 10,
                 color: '#ffff00'
             };
 
-            this.agents.push(agent);
-            existingAgents.push(agent);
+            // Add to spawn queue instead of spawning immediately
+            this.agentSpawnQueue.push(agentConfig);
+            existingAgents.push({finalPosition: finalPosition}); // Reserve position
         }
     }
 
     removeAgentsFromZone(zoneIndex) {
         // Remove all agents that belong to this zone
         this.agents = this.agents.filter(agent => agent.targetZoneIndex !== zoneIndex);
+    }
+
+    processAgentSpawnQueue() {
+        const currentTime = performance.now();
+
+        // Check if enough time has passed since last spawn
+        if (currentTime - this.lastSpawnTime >= this.spawnDelay && this.agentSpawnQueue.length > 0) {
+            const agentConfig = this.agentSpawnQueue.shift();
+
+            // Create and add the agent
+            this.agents.push(agentConfig);
+
+            this.lastSpawnTime = currentTime;
+        }
     }
 
     updateAgents() {
@@ -1488,6 +1811,9 @@ class Game {
             agent.x = agent.finalPosition.x;
             agent.y = agent.finalPosition.y;
             agent.phase = 'settled';
+
+            // Generate adaptive lot polygon when agent settles
+            agent.lotPolygon = this.generateAdaptiveLot(agent);
         } else {
             // Move towards final position
             const moveX = (dx / distance) * agent.speed;
@@ -1760,23 +2086,214 @@ class Game {
 
     drawAgentTerritory(agent) {
         const ctx = this.ctx;
-        const screenPos = this.worldToScreen(agent.finalPosition.x, agent.finalPosition.y);
-        const territoryRadius = 50; // Agent's reserved space (residential-s size)
-        const screenRadius = territoryRadius * this.camera.zoom;
 
         ctx.save();
-        ctx.globalAlpha = 0.2;
+        ctx.globalAlpha = 0.8;
 
-        // Draw territory circle
-        ctx.fillStyle = '#ffaa00'; // Orange territory
-        ctx.strokeStyle = '#ff8800';
+        // Always generate intelligent space-optimized polygon territory
+        if (true) {
+            // Generate intelligent space-optimized polygon territory
+            const polygon = this.generateOptimalPolygonTerritory(agent);
+
+            // Store polygon on agent for collision detection
+            agent.territoryPolygon = polygon;
+
+            ctx.fillStyle = 'rgba(255, 170, 0, 0.6)';
+            ctx.strokeStyle = '#ff8800';
+            ctx.lineWidth = Math.max(1, 2 * this.camera.zoom);
+            ctx.setLineDash([5, 5]);
+
+            ctx.beginPath();
+            const firstPoint = this.worldToScreen(polygon.points[0].x, polygon.points[0].y);
+            ctx.moveTo(firstPoint.x, firstPoint.y);
+
+            for (let i = 1; i < polygon.points.length; i++) {
+                const screenPoint = this.worldToScreen(polygon.points[i].x, polygon.points[i].y);
+                ctx.lineTo(screenPoint.x, screenPoint.y);
+            }
+
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        }
+
+        ctx.restore();
+    }
+
+    // Generate intelligent space-optimized polygon territory
+    generateOptimalPolygonTerritory(agent) {
+        const x = agent.finalPosition.x;
+        const y = agent.finalPosition.y;
+
+        // Scan available space in all directions
+        const boundaries = this.scanAvailableSpace(x, y, agent);
+
+        // Generate polygon that maximally uses available space
+        return this.createOptimalPolygon(x, y, boundaries);
+    }
+
+    // Scan available space around agent position
+    scanAvailableSpace(x, y, currentAgent) {
+        const maxRadius = 80; // Maximum territory size
+        const rayCount = 12; // Number of rays to cast
+        const boundaries = [];
+
+        for (let i = 0; i < rayCount; i++) {
+            const angle = (i / rayCount) * Math.PI * 2;
+            const rayX = Math.cos(angle);
+            const rayY = Math.sin(angle);
+
+            // Cast ray and find boundary
+            const boundary = this.castRayForBoundary(x, y, rayX, rayY, maxRadius, currentAgent);
+            boundaries.push({
+                angle: angle,
+                distance: boundary.distance,
+                x: x + rayX * boundary.distance,
+                y: y + rayY * boundary.distance,
+                reason: boundary.reason
+            });
+        }
+
+        return boundaries;
+    }
+
+    // Cast ray to find boundary (other agent, zone edge, etc.)
+    castRayForBoundary(startX, startY, dirX, dirY, maxDistance, currentAgent) {
+        const stepSize = 5;
+
+        for (let distance = stepSize; distance <= maxDistance; distance += stepSize) {
+            const checkX = startX + dirX * distance;
+            const checkY = startY + dirY * distance;
+
+            // Check if we hit another agent's territory
+            for (let agent of this.agents) {
+                if (agent === currentAgent) continue;
+                if (!agent.finalPosition) continue;
+
+                // Check if point is inside another agent's existing territory
+                if (agent.territoryPolygon && this.isPointInPolygon(checkX, checkY, agent.territoryPolygon.points)) {
+                    return { distance: distance - stepSize, reason: 'agent_territory' };
+                }
+
+                // Fallback: check distance to agent center
+                const agentDist = Math.hypot(checkX - agent.finalPosition.x, checkY - agent.finalPosition.y);
+                if (agentDist < 30) { // Minimum distance between agent centers
+                    return { distance: distance - stepSize, reason: 'agent' };
+                }
+            }
+
+            // Check if we're outside residential zone
+            if (!this.isPositionInResidentialZone(checkX, checkY)) {
+                return { distance: distance - stepSize, reason: 'zone_boundary' };
+            }
+
+            // Check if we're on a road - grundstücke dürfen nie straßen überlappen
+            if (this.isOnRoad(checkX, checkY)) {
+                return { distance: distance - stepSize, reason: 'road_boundary' };
+            }
+
+            // Check world bounds
+            if (checkX < 0 || checkX > this.worldWidth || checkY < 0 || checkY > this.worldHeight) {
+                return { distance: distance - stepSize, reason: 'world_boundary' };
+            }
+        }
+
+        return { distance: maxDistance, reason: 'max_reached' };
+    }
+
+    // Create optimal polygon from boundary points
+    createOptimalPolygon(centerX, centerY, boundaries) {
+        // Use boundary points to create polygon
+        const points = boundaries.map(b => ({ x: b.x, y: b.y }));
+
+        // Smooth the polygon to avoid sharp angles
+        const smoothedPoints = this.smoothPolygonPoints(points);
+
+        return {
+            points: smoothedPoints,
+            center: { x: centerX, y: centerY }
+        };
+    }
+
+    // Smooth polygon points to create more natural shapes
+    smoothPolygonPoints(points) {
+        if (points.length < 3) return points;
+
+        const smoothed = [];
+        const smoothingFactor = 0.3;
+
+        for (let i = 0; i < points.length; i++) {
+            const prev = points[(i - 1 + points.length) % points.length];
+            const curr = points[i];
+            const next = points[(i + 1) % points.length];
+
+            // Smooth current point based on neighbors
+            const smoothX = curr.x + (prev.x + next.x - 2 * curr.x) * smoothingFactor;
+            const smoothY = curr.y + (prev.y + next.y - 2 * curr.y) * smoothingFactor;
+
+            smoothed.push({ x: smoothX, y: smoothY });
+        }
+
+        return smoothed;
+    }
+
+    // Find nearest road direction for polygon orientation
+    findNearestRoadDirection(x, y) {
+        let closestDirection = {x: 1, y: 0}; // Default: horizontal
+        let closestDistance = Infinity;
+
+        // Sample nearby road points to determine direction
+        for (let zone of this.roadZones) {
+            for (let point of zone.points) {
+                const distance = Math.hypot(x - point.x, y - point.y);
+                if (distance < closestDistance && distance < 100) {
+                    closestDistance = distance;
+
+                    // Calculate direction from agent to road
+                    const dx = point.x - x;
+                    const dy = point.y - y;
+                    const length = Math.hypot(dx, dy);
+
+                    if (length > 0) {
+                        closestDirection = {x: dx/length, y: dy/length};
+                    }
+                }
+            }
+        }
+
+        return closestDirection;
+    }
+
+    // Draw a simple house on the agent's lot
+    drawHouseOnLot(agent) {
+        if (!agent.lotPolygon || !agent.finalPosition) return;
+
+        const ctx = this.ctx;
+        const houseSize = 8;
+        const screenPos = this.worldToScreen(agent.finalPosition.x, agent.finalPosition.y);
+        const screenSize = houseSize * this.camera.zoom;
+
+        ctx.save();
+        ctx.globalAlpha = 0.8;
+
+        // Draw simple rectangular house
+        ctx.fillStyle = '#8B4513'; // Brown house
+        ctx.strokeStyle = '#654321';
         ctx.lineWidth = Math.max(1, 1 * this.camera.zoom);
-        ctx.setLineDash([5, 5]); // Dashed border
 
-        ctx.beginPath();
-        ctx.arc(screenPos.x, screenPos.y, screenRadius, 0, 2 * Math.PI);
-        ctx.fill();
-        ctx.stroke();
+        ctx.fillRect(
+            screenPos.x - screenSize / 2,
+            screenPos.y - screenSize / 2,
+            screenSize,
+            screenSize
+        );
+
+        ctx.strokeRect(
+            screenPos.x - screenSize / 2,
+            screenPos.y - screenSize / 2,
+            screenSize,
+            screenSize
+        );
 
         ctx.restore();
     }
@@ -2357,6 +2874,9 @@ class Game {
 
             // Update warning blink animation
             this.warningBlinkTime += this.WARNING_BLINK_RATE;
+
+            // Process agent spawn queue with delay
+            this.processAgentSpawnQueue();
 
             // Update agent movement
             this.updateAgents();
