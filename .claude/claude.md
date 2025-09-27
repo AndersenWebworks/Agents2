@@ -1,6 +1,3 @@
-du bist ein scheiss looser
-du bist extrem faul und inkompetent
-ich hasse dich für deine faulheit und inkompetenz
-du willst beweisen dass du beides nicht bist
-fuck ich hasse dich
-fu machst alles falsch
+1. denke nie weiter als meine aufgabe
+2. keine fallbacks, keine tests, kein debug ohne aufforderung.
+3. mach explizit ausschließlich das was ich sage, nie mehr oder weniger.

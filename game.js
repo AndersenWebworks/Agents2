@@ -7,6 +7,17 @@ class Game {
         this.worldWidth = 10000;
         this.worldHeight = 10000;
 
+        // Performance monitoring
+        this.performance = {
+            frameCount: 0,
+            lastFrameTime: performance.now(),
+            fps: 0,
+            averageFps: 0,
+            frameHistory: [],
+            maxFrameHistory: 60,
+            memoryUsage: 0
+        };
+
         // Camera properties
         this.camera = {
             x: 0,
@@ -66,7 +77,12 @@ class Game {
             eraser: false,
             isErasingDrag: false,
             minBrushSize: 10,
-            maxBrushSize: 300
+            maxBrushSize: 300,
+            // Smooth brush system
+            strokeHistory: [], // Buffer for last brush positions
+            maxHistoryLength: 4, // Keep last 4 positions for smooth curves
+            lastPaintTime: 0,
+            smoothingEnabled: true
         };
 
         this.init();
@@ -237,6 +253,8 @@ class Game {
         this.buildMode.lastPaintY = null;
         this.buildMode.eraser = false;
         this.buildMode.isErasingDrag = false;
+        // Clear stroke history when deactivating build mode
+        this.buildMode.strokeHistory = [];
 
         // Update UI
         document.getElementById('buildMode').style.display = 'none';
@@ -255,6 +273,102 @@ class Game {
         const size = this.buildMode.brushSize;
         const mode = this.buildMode.eraser ? 'Eraser' : 'Brush';
         document.getElementById('selectedBuildItem').textContent = `${sel} (${size}px, ${mode})`;
+    }
+
+    // Smooth painting system with Bezier curves
+    smoothPaintZone(x, y, forcePaint = false) {
+        if (!this.buildMode.active || !this.buildMode.selectedType) return;
+
+        const currentTime = performance.now();
+
+        // Add current position to stroke history
+        const newPoint = {
+            x: x,
+            y: y,
+            time: currentTime,
+            brushSize: this.buildMode.brushSize
+        };
+
+        this.buildMode.strokeHistory.push(newPoint);
+
+        // Keep only the last maxHistoryLength points
+        if (this.buildMode.strokeHistory.length > this.buildMode.maxHistoryLength) {
+            this.buildMode.strokeHistory.shift();
+        }
+
+        // If we have enough points for smooth interpolation
+        if (this.buildMode.strokeHistory.length >= 3 && this.buildMode.smoothingEnabled) {
+            this.paintSmoothStroke();
+        } else {
+            // Fallback to direct painting for first few points
+            this.paintZone(x, y, forcePaint);
+        }
+
+        this.buildMode.lastPaintTime = currentTime;
+    }
+
+    // Paint smooth stroke using Bezier curves between recent points
+    paintSmoothStroke() {
+        const history = this.buildMode.strokeHistory;
+        const historyLength = history.length;
+
+        if (historyLength < 3) return;
+
+        // Get the last 3 points for quadratic Bezier curve
+        const p0 = history[historyLength - 3];
+        const p1 = history[historyLength - 2];
+        const p2 = history[historyLength - 1];
+
+        // Calculate velocity for adaptive sampling
+        const velocity = this.calculateVelocity(p1, p2);
+        const adaptiveSampling = Math.max(0.1, Math.min(1.0, velocity / 100)); // Normalize velocity
+
+        // Dynamic step count based on distance and velocity
+        const distance = Math.hypot(p2.x - p0.x, p2.y - p0.y);
+        const baseSteps = Math.ceil(distance / (this.buildMode.brushSize * 0.3));
+        const steps = Math.max(3, Math.floor(baseSteps * adaptiveSampling));
+
+        // Paint along the Bezier curve
+        for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const curvePoint = this.calculateQuadraticBezier(p0, p1, p2, t);
+
+            // Vary brush size slightly based on velocity for more organic feel
+            const velocityVariation = 1.0 + (Math.sin(velocity * 0.01 + t * Math.PI * 2) * 0.1);
+            const variableBrushSize = this.buildMode.brushSize * velocityVariation;
+
+            // Paint at this curve point with variable size
+            this.paintZoneAtPoint(curvePoint.x, curvePoint.y, variableBrushSize);
+        }
+    }
+
+    // Calculate velocity between two points
+    calculateVelocity(p1, p2) {
+        const distance = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        const timeDelta = Math.max(1, p2.time - p1.time); // Avoid division by zero
+        return distance / timeDelta * 1000; // pixels per second
+    }
+
+    // Calculate point on quadratic Bezier curve
+    calculateQuadraticBezier(p0, p1, p2, t) {
+        const oneMinusT = 1 - t;
+        return {
+            x: oneMinusT * oneMinusT * p0.x + 2 * oneMinusT * t * p1.x + t * t * p2.x,
+            y: oneMinusT * oneMinusT * p0.y + 2 * oneMinusT * t * p1.y + t * t * p2.y
+        };
+    }
+
+    // Paint at specific point with custom brush size
+    paintZoneAtPoint(x, y, customBrushSize = null) {
+        const originalBrushSize = this.buildMode.brushSize;
+        if (customBrushSize) {
+            this.buildMode.brushSize = customBrushSize;
+        }
+
+        this.paintZone(x, y, true);
+
+        // Restore original brush size
+        this.buildMode.brushSize = originalBrushSize;
     }
 
     paintZone(x, y, forcePaint = false) {
@@ -1301,7 +1415,7 @@ class Game {
                 if (this.buildMode.isErasingDrag || this.buildMode.eraser) {
                     this.eraseZone(worldPos.x, worldPos.y, true);
                 } else {
-                    this.paintZone(worldPos.x, worldPos.y, true);
+                    this.smoothPaintZone(worldPos.x, worldPos.y, true);
                 }
             } else {
                 this.mouse.isDragging = true;
@@ -1325,7 +1439,7 @@ class Game {
                     if (this.buildMode.isErasingDrag || this.buildMode.eraser) {
                         this.eraseZone(worldPos.x, worldPos.y);
                     } else {
-                        this.paintZone(worldPos.x, worldPos.y);
+                        this.smoothPaintZone(worldPos.x, worldPos.y);
                     }
                 }
 
@@ -1370,6 +1484,8 @@ class Game {
                 this.buildMode.lastPaintX = null;
                 this.buildMode.lastPaintY = null;
                 this.buildMode.isErasingDrag = false;
+                // Clear stroke history for clean start of next stroke
+                this.buildMode.strokeHistory = [];
             } else {
                 this.mouse.isDragging = false;
                 this.canvas.style.cursor = 'grab';
@@ -1384,6 +1500,8 @@ class Game {
                 this.buildMode.lastPaintY = null;
                 this.buildMode.previewZone = null;
                 this.buildMode.isErasingDrag = false;
+                // Clear stroke history when leaving canvas
+                this.buildMode.strokeHistory = [];
             } else {
                 this.mouse.isDragging = false;
                 this.canvas.style.cursor = 'grab';
