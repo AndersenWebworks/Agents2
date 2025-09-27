@@ -1,0 +1,82 @@
+
+        .build-items {
+            padding: 8px;
+        }
+
+        .build-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            margin: 4px 0;
+            background: #333;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .build-item:hover {
+            background: #444;
+        }
+
+        .build-item.selected {
+            background: #4a7c3f;
+        }
+
+        .build-item-icon {
+            width: 24px;
+            height: 24px;
+            background: #555;
+            border-radius: 4px;
+            margin-right: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+
+        .build-item-name {
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="ui">
+        <div>Camera: <span id="cameraPos">0, 0</span></div>
+        <div>Zoom: <span id="zoomLevel">1.0</span>x</div>
+        <div>Use mouse to drag, scroll to zoom</div>
+        <div id="buildMode" style="display: none; margin-top: 10px; color: #4a7c3f;">
+            <strong>Build Mode: <span id="selectedBuildItem">None</span></strong><br>
+            Click and drag to paint zones, ESC to cancel
+        </div>
+    </div>
+
+    <div id="buildMenu">
+        <div id="buildMenuHeader">
+            <span>Build Menu</span>
+            <span id="buildMenuToggle">▼</span>
+        </div>
+        <div id="buildMenuContent">
+            <div class="build-category">
+                <div class="category-header">Zoning</div>
+                <div class="build-items">
+                    <div class="build-item" data-type="residential-small" data-size="50">
+                        <div class="build-item-icon" style="background: #4CAF50; color: white;">●</div>
+                        <div class="build-item-name">Residential S</div>
+                    </div>
+                    <div class="build-item" data-type="residential-medium" data-size="100">
+                        <div class="build-item-icon" style="background: #4CAF50; color: white;">●</div>
+                        <div class="build-item-name">Residential M</div>
+                    </div>
+                    <div class="build-item" data-type="residential-large" data-size="150">
+                        <div class="build-item-icon" style="background: #4CAF50; color: white;">●</div>
+                        <div class="build-item-name">Residential L</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="game.js"></script>
+</body>
+</html>
