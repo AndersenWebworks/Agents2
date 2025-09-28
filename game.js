@@ -435,6 +435,27 @@ class Game {
                 radius: this.buildMode.brushSize
             };
 
+            // Check if the new point overlaps with existing road zones - roads are dominant
+            const overlapRadius = this.buildMode.brushSize;
+            let overlapsWithRoad = false;
+            for (let i = 0; i < this.roadZones.length; i++) {
+                const zone = this.roadZones[i];
+                for (let j = 0; j < zone.points.length; j++) {
+                    const point = zone.points[j];
+                    const distance = Math.hypot(x - point.x, y - point.y);
+                    if (distance < overlapRadius) {
+                        overlapsWithRoad = true;
+                        break;
+                    }
+                }
+                if (overlapsWithRoad) break;
+            }
+
+            // Skip placing residential zone if it overlaps with roads
+            if (overlapsWithRoad) {
+                return;
+            }
+
             // Find all nearby zones to merge with
             const mergeDistance = this.buildMode.brushSize * 1.2;
             const matchedIndices = [];
